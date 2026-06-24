@@ -5,83 +5,12 @@ require 'graphql/client/http'
 require 'terminal-table'
 require 'rainbow'
 require 'time'
+require_relative 'geocoding'
+require_relative 'queries'
+require_relative 'hsl'
 
 KEY = ENV.fetch("HSL_API_KEY") do
   abort("Missing HSL API key! Set the 'HSL_API_KEY' variable in your environment.")
-end
-
-module Geocoding
-  module_function
-  def perform_digitransit_request(url)
-    uri = URI(url)
-
-    request = Net::HTTP::Get.new(uri)
-    request['digitransit-subscription-key'] = KEY
-
-    response = Net::HTTP.start(uri.hostname, uri.port, use_ssl: true) do |http|
-      http.request(request)
-    end
-
-    json_response = JSON.parse(response.body)
-    unless response in Net::HTTPOK
-      puts Rainbow("Error encountered!").red
-      puts json_response["message"]
-      exit
-    end
-    json_response
-  end
-
-  def get_locations(lat, lon, size = 5, type = "address")
-    base_url = "https://api.digitransit.fi/geocoding/v1/reverse?point.lat=#{lat}&point.lon=#{lon}&size=#{size}&layers=#{type}"
-
-    response = perform_digitransit_request(base_url)
-    features = response["features"]
-
-    puts "Showing #{features.length} locations:"
-    features.each_with_index do |feature, index|
-      feature = feature["properties"]
-      puts "#{index + 1}. #{feature["layer"].capitalize!}: #{feature["label"]}"
-    end
-  end
-
-  def get_addresses_by_text(text, size = 5)
-    base_url = "https://api.digitransit.fi/geocoding/v1/search?text=#{text}&size=#{size}"
-
-    puts "Searching for #{text}"
-    response = perform_digitransit_request(base_url)
-    features = response["features"]
-
-    puts "Showing #{features.length} locations:"
-    features.each_with_index do |feature, index|
-      feature = feature["properties"]
-      puts "#{index + 1}. #{feature["layer"].capitalize!}: #{feature["label"]} - confidence: #{feature["confidence"]}"
-    end
-  end
-
-  def get_address_coordinates(text, size = 5)
-    # Handle umlauts
-    text = URI.encode_uri_component(text)
-    base_url = "https://api.digitransit.fi/geocoding/v1/search?text=#{text}&size=#{size}"
-    response = perform_digitransit_request(base_url)
-    features = response["features"]
-    addresses_with_coordinates = []
-
-    features.each do |feature|
-      if feature["geometry"]["type"] == "Point"
-        lon, lat = feature["geometry"]["coordinates"]
-      end
-
-      properties = feature["properties"]
-      label = properties["label"]
-      layer = properties["layer"].capitalize!
-      confidence = properties["confidence"]
-
-      addresses_with_coordinates << {:label => label, :lat => lat, :lon => lon,
-                                     :layer => layer, :confidence => confidence}
-    end
-
-    addresses_with_coordinates
-  end
 end
 
 class Time
@@ -89,203 +18,6 @@ class Time
     self.hour * 3600 + self.min * 60 + self.sec
   end
 end
-
-module HSL
-  HTTP = GraphQL::Client::HTTP.new("https://api.digitransit.fi/routing/v2/hsl/gtfs/v1") do
-    def headers(context)
-      { "digitransit-subscription-key": KEY,
-        "Accept-Language": "fi"}
-    end
-  end
-
-  if File.file?("hsl_schema.json")
-    print "Schema found. "
-    Schema = GraphQL::Client.load_schema("hsl_schema.json")
-  else
-    print "Loading schema... "
-    Schema = GraphQL::Client.load_schema(HTTP)
-    GraphQL::Client.dump_schema(HSL::HTTP, "hsl_schema.json")
-  end
-
-  Client = GraphQL::Client.new(schema: Schema, execute: HTTP)
-  puts "GraphQL client ready!"
-end
-
-#Geocoding::get_locations("60.1871664", "24.833366", 10, "address")
-#puts Geocoding::get_address_coordinates("Aalto University", 5).inspect
-
-# Aalto metro: HSL:2000102
-# Central station: HSL:1000201
-
-AaltoMetroDepartures = HSL::Client.parse <<-'GRAPHQL'
-{
-  station(id: "HSL:2000102") {
-    name(language: "en")
-    gtfsId
-    locationType
-    vehicleMode
-    stoptimesWithoutPatterns(numberOfDepartures: 8) {
-      headsign
-      trip {
-        route {
-          shortName
-        }
-      }
-      departureDelay
-      scheduledDeparture
-      realtimeDeparture
-      serviceDay
-      }
-    }
-}
-GRAPHQL
-
-CentralTramDepartures = HSL::Client.parse <<-'GRAPHQL'
-{
-  station(id: "HSL:1000001") {
-    name(language: "en")
-    gtfsId
-    locationType
-    vehicleMode
-    stoptimesWithoutPatterns(numberOfDepartures: 10) {
-      headsign
-      trip {
-        route {
-          shortName
-        }
-      }
-      departureDelay
-      scheduledDeparture
-      realtimeDeparture
-      serviceDay
-      }
-    }
-}
-GRAPHQL
-
-KamppiDepartures = HSL::Client.parse <<-'GRAPHQL'
-{
-  stations(name: "aalto-yliopisto") {
-name(language: "en")
-    gtfsId
-    locationType
-    vehicleMode
-    stoptimesWithoutPatterns(numberOfDepartures: 10) {
-      headsign
-      pickupType  
-      trip {
-        route {
-          shortName
-        }
-      }
-      stop {
-        platformCode
-      }
-      departureDelay
-      scheduledDeparture
-      realtimeDeparture
-      serviceDay
-      }
-    }
-}
-GRAPHQL
-
-GetStopsByName = HSL::Client.parse <<-'GRAPHQL'
-query ($name: String) {
-  stops(name: $name) {
-    gtfsId
-    desc
-    name
-    code
-    lat
-    lon
-    vehicleMode
-    patterns {
-      code
-      directionId
-      headsign
-      route {
-        gtfsId
-        shortName
-        longName
-        mode
-      }
-    }
-  }
-}
-GRAPHQL
-
-GetDeparturesAtStops = HSL::Client.parse <<-'GRAPHQL'
-query ($ids: [String]){
-  stops(ids: $ids) {
-    name
-    desc
-    vehicleMode
-    stoptimesWithoutPatterns(omitNonPickups: true) {
-      scheduledArrival
-      realtimeArrival
-      arrivalDelay
-      scheduledDeparture
-      realtimeDeparture
-      departureDelay
-      realtime
-      realtimeState
-      serviceDay
-      headsign
-      trip {
-        route {
-          shortName
-        }
-      }
-    }
-  }  
-}
-GRAPHQL
-
-GetRouteWithLabels = HSL::Client.parse <<-'GRAPHQL'
-query ($lat_start: CoordinateValue!, $lon_start: CoordinateValue!, $label_start: String,
-$lat_end: CoordinateValue!, $lon_end: CoordinateValue!, $label_end: String ){
-  planConnection(
-    origin: {location: {coordinate: {latitude: $lat_start, longitude: $lon_start}}, label: $label_start}
-    destination: {location: {coordinate: {latitude: $lat_end, longitude: $lon_end}}, label: $label_end}
-    first: 3
-  ) {
-    pageInfo {
-      endCursor
-    }
-    edges {
-      node {
-        start
-        end
-        legs {
-          from {
-            name
-          }
-          to {
-            name
-          }
-          start {
-            scheduledTime
-          }
-          end {
-            scheduledTime
-          }
-          mode
-          headsign
-          trip {
-            routeShortName
-          }
-          duration
-          realtimeState
-        }
-        emissionsPerPerson {
-          co2
-        }
-      }
-    }
-  }
-}
-GRAPHQL
 
 def show_departures_at_stations
   while true
@@ -363,7 +95,7 @@ def get_address_from_user
 end
 
 def find_stops_by_name(name)
-  result = HSL::Client.query(GetStopsByName, variables: {name: name})
+  result = HSL::Client.query(Queries::GetStopsByName, variables: {name: name})
   result.data.stops
 end
 
@@ -441,7 +173,7 @@ end
 # Returns departures
 def departures_at_stops(ids)
 
-  result = HSL::Client.query(GetDeparturesAtStops, variables: {ids: ids})
+  result = HSL::Client.query(Queries::GetDeparturesAtStops, variables: {ids: ids})
   result = result.data.stops
   departures = []
   result.each do |stop|
@@ -533,7 +265,7 @@ def plan_connection()
   puts Rainbow("Start: #{start_location.label}").bold
   puts Rainbow("Destination: #{end_location.label}").bold
 
-  result = HSL::Client.query(GetRouteWithLabels, variables: {lon_start: start_location.lon,
+  result = HSL::Client.query(Queries::GetRouteWithLabels, variables: {lon_start: start_location.lon,
                                                              lat_start: start_location.lat,
                                                              label_start: start_location.label,
                                                              lon_end: end_location.lon,
