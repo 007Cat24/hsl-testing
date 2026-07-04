@@ -349,4 +349,10 @@ def main
   end
 end
 
+Signal.trap("SIGINT") do
+  puts
+  puts "Exiting..."
+  exit
+end
+
 main
